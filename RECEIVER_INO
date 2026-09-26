@@ -1,0 +1,1858 @@
+
+/*
+  ============================================================
+  HELTEC WIFI LORA 32 V3
+  NODE 2 - LORA GATEWAY / RECEIVER
+  ============================================================
+
+  RECEIVES:
+
+    AIRNODE01,
+    MQ3,
+    MQ8,
+    DHT22 TEMPERATURE,
+    DHT22 HUMIDITY,
+    GPS LATITUDE,
+    GPS LONGITUDE,
+    GPS ALTITUDE,
+    GPS SATELLITES,
+    GPS HDOP,
+    GPS FIX
+
+  RECEIVER ALSO PROVIDES:
+
+    - Wi-Fi
+    - Local Web Server
+    - Supabase Upload
+    - LoRa RSSI
+    - LoRa SNR
+
+  OLED:
+    NOT USED
+
+  MPU9250:
+    COMPLETELY REMOVED
+
+  ============================================================
+*/
+
+#include <Arduino.h>
+#include <RadioLib.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+// ============================================================
+// WIFI SETTINGS
+// ============================================================
+
+const char* WIFI_SSID =
+  "XXX";
+
+const char* WIFI_PASSWORD =
+  "XXXXX";
+
+// ============================================================
+// SUPABASE
+// ============================================================
+
+const char* SUPABASE_URL =
+  "XXXXX";
+
+const char* SUPABASE_KEY =
+  "XXXX";
+
+const char* SUPABASE_TABLE =
+  "air_quality_readings";
+
+// ============================================================
+// HELTEC V3 SX1262 PINS
+// ============================================================
+
+#define LORA_CS    8
+#define LORA_DIO1  14
+#define LORA_RST   12
+#define LORA_BUSY  13
+
+#define LORA_SCK   9
+#define LORA_MISO  11
+#define LORA_MOSI  10
+
+#define LORA_FREQUENCY 865.0
+
+// ============================================================
+// SPI
+// ============================================================
+
+SPIClass spiLoRa(FSPI);
+
+SX1262 radio = new Module(
+  LORA_CS,
+  LORA_DIO1,
+  LORA_RST,
+  LORA_BUSY,
+  spiLoRa
+);
+
+// ============================================================
+// WEB SERVER
+// ============================================================
+
+WebServer server(80);
+
+// ============================================================
+// SENSOR DATA
+// ============================================================
+
+String deviceID =
+  "AIRNODE01";
+
+int mq3Value = 0;
+
+int mq8Value = 0;
+
+float dhtTemperature = 0.0;
+
+float dhtHumidity = 0.0;
+
+// ============================================================
+// GPS DATA
+// ============================================================
+
+double latitude = 0.0;
+
+double longitude = 0.0;
+
+float altitude = 0.0;
+
+int satellites = 0;
+
+float hdop = 0.0;
+
+bool gpsFix = false;
+
+// ============================================================
+// LORA DATA
+// ============================================================
+
+float rssi = 0.0;
+
+float snr = 0.0;
+
+// ============================================================
+// STATUS
+// ============================================================
+
+bool receivedData = false;
+
+unsigned long lastPacketTime = 0;
+
+unsigned long lastUploadTime = 0;
+
+unsigned long lastWiFiCheck = 0;
+
+const unsigned long UPLOAD_INTERVAL =
+  5000;
+
+const unsigned long WIFI_CHECK_INTERVAL =
+  10000;
+
+// ============================================================
+// WEB PAGE
+// ============================================================
+
+const char MAIN_PAGE[] PROGMEM = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>AirNode Monitor</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    background: #f2f2f2;
+    margin: 0;
+    padding: 20px;
+}
+
+.container {
+    max-width: 900px;
+    margin: auto;
+}
+
+.header {
+    background: #222;
+    color: white;
+    padding: 20px;
+    border-radius: 12px;
+    text-align: center;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.card {
+    background: white;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.label {
+    color: #666;
+    font-size: 16px;
+}
+
+.value {
+    font-size: 28px;
+    font-weight: bold;
+    margin-top: 8px;
+}
+
+.unit {
+    font-size: 14px;
+    color: #777;
+}
+
+.status {
+    padding: 12px;
+    border-radius: 8px;
+    margin-top: 15px;
+}
+
+.online {
+    background: #d7ffd7;
+}
+
+.offline {
+    background: #ffd7d7;
+}
+
+.gps {
+    background: #e0f0ff;
+}
+
+.footer {
+    text-align: center;
+    color: #777;
+    margin-top: 20px;
+}
+
+@media(max-width:600px) {
+
+    .grid {
+        grid-template-columns: 1fr;
+    }
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="header">
+
+<h1>AirNode Monitor</h1>
+
+<p>LoRa Sensor Gateway</p>
+
+<p>
+Device:
+<span id="device">--</span>
+</p>
+
+</div>
+
+<div class="grid">
+
+<!-- MQ3 -->
+
+<div class="card">
+
+<div class="label">
+MQ-3
+</div>
+
+<div class="value"
+id="mq3">
+--
+</div>
+
+<div class="unit">
+Raw ADC
+</div>
+
+</div>
+
+<!-- MQ8 -->
+
+<div class="card">
+
+<div class="label">
+MQ-8
+</div>
+
+<div class="value"
+id="mq8">
+--
+</div>
+
+<div class="unit">
+Raw ADC
+</div>
+
+</div>
+
+<!-- Temperature -->
+
+<div class="card">
+
+<div class="label">
+Temperature
+</div>
+
+<div class="value"
+id="temperature">
+--
+</div>
+
+<div class="unit">
+°C
+</div>
+
+</div>
+
+<!-- Humidity -->
+
+<div class="card">
+
+<div class="label">
+Humidity
+</div>
+
+<div class="value"
+id="humidity">
+--
+</div>
+
+<div class="unit">
+%
+</div>
+
+</div>
+
+<!-- Latitude -->
+
+<div class="card gps">
+
+<div class="label">
+Latitude
+</div>
+
+<div class="value"
+id="latitude">
+--
+</div>
+
+<div class="unit">
+degrees
+</div>
+
+</div>
+
+<!-- Longitude -->
+
+<div class="card gps">
+
+<div class="label">
+Longitude
+</div>
+
+<div class="value"
+id="longitude">
+--
+</div>
+
+<div class="unit">
+degrees
+</div>
+
+</div>
+
+<!-- Altitude -->
+
+<div class="card gps">
+
+<div class="label">
+Altitude
+</div>
+
+<div class="value"
+id="altitude">
+--
+</div>
+
+<div class="unit">
+meters
+</div>
+
+</div>
+
+<!-- Satellites -->
+
+<div class="card gps">
+
+<div class="label">
+GPS Satellites
+</div>
+
+<div class="value"
+id="satellites">
+--
+</div>
+
+<div class="unit">
+satellites
+</div>
+
+</div>
+
+<!-- HDOP -->
+
+<div class="card gps">
+
+<div class="label">
+GPS HDOP
+</div>
+
+<div class="value"
+id="hdop">
+--
+</div>
+
+<div class="unit">
+HDOP
+</div>
+
+</div>
+
+<!-- GPS FIX -->
+
+<div class="card gps">
+
+<div class="label">
+GPS Fix
+</div>
+
+<div class="value"
+id="gpsfix">
+--
+</div>
+
+<div class="unit">
+GPS status
+</div>
+
+</div>
+
+<!-- RSSI -->
+
+<div class="card">
+
+<div class="label">
+LoRa RSSI
+</div>
+
+<div class="value"
+id="rssi">
+--
+</div>
+
+<div class="unit">
+dBm
+</div>
+
+</div>
+
+<!-- SNR -->
+
+<div class="card">
+
+<div class="label">
+LoRa SNR
+</div>
+
+<div class="value"
+id="snr">
+--
+</div>
+
+<div class="unit">
+dB
+</div>
+
+</div>
+
+</div>
+
+<div id="status"
+class="status offline">
+
+Waiting for LoRa data...
+
+</div>
+
+<div class="footer">
+
+Auto refresh every 2 seconds
+
+</div>
+
+</div>
+
+<script>
+
+function updateData()
+{
+
+    fetch('/data')
+
+    .then(response => response.json())
+
+    .then(data => {
+
+        document.getElementById("device")
+        .innerText = data.device;
+
+        document.getElementById("mq3")
+        .innerText = data.mq3;
+
+        document.getElementById("mq8")
+        .innerText = data.mq8;
+
+        document.getElementById("temperature")
+        .innerText =
+        data.temperature.toFixed(2);
+
+        document.getElementById("humidity")
+        .innerText =
+        data.humidity.toFixed(2);
+
+        document.getElementById("latitude")
+        .innerText =
+        data.latitude.toFixed(6);
+
+        document.getElementById("longitude")
+        .innerText =
+        data.longitude.toFixed(6);
+
+        document.getElementById("altitude")
+        .innerText =
+        data.altitude.toFixed(2);
+
+        document.getElementById("satellites")
+        .innerText =
+        data.satellites;
+
+        document.getElementById("hdop")
+        .innerText =
+        data.hdop.toFixed(2);
+
+        document.getElementById("gpsfix")
+        .innerText =
+        data.gpsfix ? "YES" : "NO";
+
+        document.getElementById("rssi")
+        .innerText =
+        data.rssi.toFixed(1);
+
+        document.getElementById("snr")
+        .innerText =
+        data.snr.toFixed(1);
+
+        let status =
+        document.getElementById("status");
+
+        if(data.received)
+        {
+
+            status.innerText =
+            "LoRa sensor data received";
+
+            status.className =
+            "status online";
+
+        }
+        else
+        {
+
+            status.innerText =
+            "Waiting for LoRa data";
+
+            status.className =
+            "status offline";
+
+        }
+
+    })
+
+    .catch(error => {
+
+        console.log(error);
+
+    });
+
+}
+
+setInterval(
+    updateData,
+    2000
+);
+
+updateData();
+
+</script>
+
+</body>
+
+</html>
+
+)rawliteral";
+
+// ============================================================
+// WEB ROOT
+// ============================================================
+
+void handleRoot()
+{
+    server.send(
+        200,
+        "text/html",
+        MAIN_PAGE
+    );
+}
+
+// ============================================================
+// WEB DATA API
+// ============================================================
+
+void handleData()
+{
+    String json = "{";
+
+    json += "\"device\":\"";
+    json += deviceID;
+    json += "\",";
+
+    json += "\"mq3\":";
+    json += String(mq3Value);
+    json += ",";
+
+    json += "\"mq8\":";
+    json += String(mq8Value);
+    json += ",";
+
+    json += "\"temperature\":";
+    json += String(dhtTemperature, 2);
+    json += ",";
+
+    json += "\"humidity\":";
+    json += String(dhtHumidity, 2);
+    json += ",";
+
+    json += "\"latitude\":";
+    json += String(latitude, 6);
+    json += ",";
+
+    json += "\"longitude\":";
+    json += String(longitude, 6);
+    json += ",";
+
+    json += "\"altitude\":";
+    json += String(altitude, 2);
+    json += ",";
+
+    json += "\"satellites\":";
+    json += String(satellites);
+    json += ",";
+
+    json += "\"hdop\":";
+    json += String(hdop, 2);
+    json += ",";
+
+    json += "\"gpsfix\":";
+    json += gpsFix ? "true" : "false";
+    json += ",";
+
+    json += "\"rssi\":";
+    json += String(rssi, 1);
+    json += ",";
+
+    json += "\"snr\":";
+    json += String(snr, 1);
+    json += ",";
+
+    json += "\"received\":";
+    json += receivedData ? "true" : "false";
+
+    json += "}";
+
+    server.send(
+        200,
+        "application/json",
+        json
+    );
+}
+
+// ============================================================
+// WIFI CONNECTION
+// ============================================================
+
+void connectWiFi()
+{
+    Serial.println();
+    Serial.println(
+        "Connecting to Wi-Fi..."
+    );
+
+    WiFi.mode(WIFI_STA);
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
+
+    int attempts = 0;
+
+    while (
+        WiFi.status() != WL_CONNECTED &&
+        attempts < 30
+    )
+    {
+        delay(500);
+
+        Serial.print(".");
+
+        attempts++;
+    }
+
+    Serial.println();
+
+    if (
+        WiFi.status() == WL_CONNECTED
+    )
+    {
+        Serial.println(
+            "Wi-Fi CONNECTED"
+        );
+
+        Serial.print(
+            "IP address: "
+        );
+
+        Serial.println(
+            WiFi.localIP()
+        );
+
+        Serial.print(
+            "Signal RSSI: "
+        );
+
+        Serial.print(
+            WiFi.RSSI()
+        );
+
+        Serial.println(
+            " dBm"
+        );
+    }
+    else
+    {
+        Serial.println(
+            "Wi-Fi connection FAILED"
+        );
+    }
+}
+
+// ============================================================
+// PARSE LORA PACKET
+// ============================================================
+
+bool parsePacket(String packet)
+{
+    /*
+       NEW EXPECTED PACKET:
+
+       AIRNODE01,
+       MQ3,
+       MQ8,
+       TEMP,
+       HUMIDITY,
+       LATITUDE,
+       LONGITUDE,
+       ALTITUDE,
+       SATELLITES,
+       HDOP,
+       GPS_FIX
+
+       Example:
+
+       AIRNODE01,1842,2130,28.45,61.20,
+       28.459500,77.026600,214.30,8,0.90,1
+    */
+
+    packet.trim();
+
+    Serial.println(
+        "Parsing packet..."
+    );
+
+    // --------------------------------------------------------
+    // We need 10 commas for 11 fields
+    // --------------------------------------------------------
+
+    int comma[10];
+
+    int searchStart = 0;
+
+    for (
+        int i = 0;
+        i < 10;
+        i++
+    )
+    {
+        comma[i] =
+            packet.indexOf(
+                ',',
+                searchStart
+            );
+
+        if (
+            comma[i] < 0
+        )
+        {
+            Serial.println(
+                "Not enough fields in packet"
+            );
+
+            return false;
+        }
+
+        searchStart =
+            comma[i] + 1;
+    }
+
+    // --------------------------------------------------------
+    // FIELD 0 - DEVICE ID
+    // --------------------------------------------------------
+
+    String id =
+        packet.substring(
+            0,
+            comma[0]
+        );
+
+    if (
+        id != "AIRNODE01"
+    )
+    {
+        Serial.println(
+            "Unknown device ID"
+        );
+
+        return false;
+    }
+
+    // --------------------------------------------------------
+    // FIELD 1 - MQ3
+    // --------------------------------------------------------
+
+    String mq3 =
+        packet.substring(
+            comma[0] + 1,
+            comma[1]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 2 - MQ8
+    // --------------------------------------------------------
+
+    String mq8 =
+        packet.substring(
+            comma[1] + 1,
+            comma[2]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 3 - TEMPERATURE
+    // --------------------------------------------------------
+
+    String temperature =
+        packet.substring(
+            comma[2] + 1,
+            comma[3]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 4 - HUMIDITY
+    // --------------------------------------------------------
+
+    String humidity =
+        packet.substring(
+            comma[3] + 1,
+            comma[4]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 5 - LATITUDE
+    // --------------------------------------------------------
+
+    String lat =
+        packet.substring(
+            comma[4] + 1,
+            comma[5]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 6 - LONGITUDE
+    // --------------------------------------------------------
+
+    String lon =
+        packet.substring(
+            comma[5] + 1,
+            comma[6]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 7 - ALTITUDE
+    // --------------------------------------------------------
+
+    String alt =
+        packet.substring(
+            comma[6] + 1,
+            comma[7]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 8 - SATELLITES
+    // --------------------------------------------------------
+
+    String sat =
+        packet.substring(
+            comma[7] + 1,
+            comma[8]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 9 - HDOP
+    // --------------------------------------------------------
+
+    String hdopString =
+        packet.substring(
+            comma[8] + 1,
+            comma[9]
+        );
+
+    // --------------------------------------------------------
+    // FIELD 10 - GPS FIX
+    // --------------------------------------------------------
+
+    String fix =
+        packet.substring(
+            comma[9] + 1
+        );
+
+    // --------------------------------------------------------
+    // CONVERT VALUES
+    // --------------------------------------------------------
+
+    mq3Value =
+        mq3.toInt();
+
+    mq8Value =
+        mq8.toInt();
+
+    dhtTemperature =
+        temperature.toFloat();
+
+    dhtHumidity =
+        humidity.toFloat();
+
+    latitude =
+        lat.toDouble();
+
+    longitude =
+        lon.toDouble();
+
+    altitude =
+        alt.toFloat();
+
+    satellites =
+        sat.toInt();
+
+    hdop =
+        hdopString.toFloat();
+
+    gpsFix =
+        fix.toInt() == 1;
+
+    deviceID =
+        id;
+
+    // --------------------------------------------------------
+    // DEBUG
+    // --------------------------------------------------------
+
+    Serial.println(
+        "Packet parsing SUCCESS"
+    );
+
+    return true;
+}
+
+// ============================================================
+// RECEIVE LORA
+// ============================================================
+
+void receiveLoRa()
+{
+    String packet;
+
+    int state =
+        radio.receive(packet);
+
+    if (
+        state == RADIOLIB_ERR_NONE
+    )
+    {
+        Serial.println();
+
+        Serial.println(
+            "======================================"
+        );
+
+        Serial.println(
+            "LORA PACKET RECEIVED"
+        );
+
+        Serial.print(
+            "RAW: "
+        );
+
+        Serial.println(
+            packet
+        );
+
+        // ----------------------------------------------------
+        // PARSE
+        // ----------------------------------------------------
+
+        if (
+            parsePacket(packet)
+        )
+        {
+            // ------------------------------------------------
+            // RADIO QUALITY
+            // ------------------------------------------------
+
+            rssi =
+                radio.getRSSI();
+
+            snr =
+                radio.getSNR();
+
+            receivedData =
+                true;
+
+            lastPacketTime =
+                millis();
+
+            // ------------------------------------------------
+            // PRINT VALUES
+            // ------------------------------------------------
+
+            Serial.println();
+
+            Serial.println(
+                "Parsed sensor data:"
+            );
+
+            Serial.print(
+                "MQ-3: "
+            );
+
+            Serial.println(
+                mq3Value
+            );
+
+            Serial.print(
+                "MQ-8: "
+            );
+
+            Serial.println(
+                mq8Value
+            );
+
+            Serial.print(
+                "Temperature: "
+            );
+
+            Serial.print(
+                dhtTemperature,
+                2
+            );
+
+            Serial.println(
+                " C"
+            );
+
+            Serial.print(
+                "Humidity: "
+            );
+
+            Serial.print(
+                dhtHumidity,
+                2
+            );
+
+            Serial.println(
+                " %"
+            );
+
+            Serial.print(
+                "Latitude: "
+            );
+
+            Serial.println(
+                latitude,
+                6
+            );
+
+            Serial.print(
+                "Longitude: "
+            );
+
+            Serial.println(
+                longitude,
+                6
+            );
+
+            Serial.print(
+                "Altitude: "
+            );
+
+            Serial.print(
+                altitude,
+                2
+            );
+
+            Serial.println(
+                " m"
+            );
+
+            Serial.print(
+                "Satellites: "
+            );
+
+            Serial.println(
+                satellites
+            );
+
+            Serial.print(
+                "HDOP: "
+            );
+
+            Serial.println(
+                hdop,
+                2
+            );
+
+            Serial.print(
+                "GPS Fix: "
+            );
+
+            Serial.println(
+                gpsFix
+                ? "YES"
+                : "NO"
+            );
+
+            Serial.print(
+                "LoRa RSSI: "
+            );
+
+            Serial.print(
+                rssi,
+                1
+            );
+
+            Serial.println(
+                " dBm"
+            );
+
+            Serial.print(
+                "LoRa SNR: "
+            );
+
+            Serial.print(
+                snr,
+                1
+            );
+
+            Serial.println(
+                " dB"
+            );
+        }
+        else
+        {
+            Serial.println(
+                "INVALID PACKET FORMAT"
+            );
+        }
+
+        Serial.println(
+            "======================================"
+        );
+
+        // ----------------------------------------------------
+        // CONTINUE RECEIVING
+        // ----------------------------------------------------
+
+        radio.startReceive();
+    }
+
+    else if (
+        state ==
+        RADIOLIB_ERR_CRC_MISMATCH
+    )
+    {
+        Serial.println(
+            "LoRa CRC error"
+        );
+
+        radio.startReceive();
+    }
+
+    else
+    {
+        radio.startReceive();
+    }
+}
+
+// ============================================================
+// SUPABASE UPLOAD
+// ============================================================
+
+void uploadToSupabase()
+{
+    if (
+        !receivedData
+    )
+    {
+        return;
+    }
+
+    if (
+        millis() - lastUploadTime <
+        UPLOAD_INTERVAL
+    )
+    {
+        return;
+    }
+
+    lastUploadTime =
+        millis();
+
+    // --------------------------------------------------------
+    // WIFI CHECK
+    // --------------------------------------------------------
+
+    if (
+        WiFi.status() != WL_CONNECTED
+    )
+    {
+        Serial.println(
+            "Supabase upload skipped - Wi-Fi offline"
+        );
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // HTTPS
+    // --------------------------------------------------------
+
+    WiFiClientSecure client;
+
+    client.setInsecure();
+
+    HTTPClient http;
+
+    String url =
+        String(SUPABASE_URL) +
+        "/rest/v1/" +
+        SUPABASE_TABLE;
+
+    Serial.println();
+
+    Serial.println(
+        "Uploading to Supabase..."
+    );
+
+    Serial.print(
+        "Supabase URL: "
+    );
+
+    Serial.println(
+        url
+    );
+
+    if (
+        !http.begin(
+            client,
+            url
+        )
+    )
+    {
+        Serial.println(
+            "HTTP connection failed"
+        );
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // HEADERS
+    // --------------------------------------------------------
+
+    http.addHeader(
+        "Content-Type",
+        "application/json"
+    );
+
+    http.addHeader(
+        "apikey",
+        SUPABASE_KEY
+    );
+
+    http.addHeader(
+        "Authorization",
+        "Bearer " +
+        String(SUPABASE_KEY)
+    );
+
+    http.addHeader(
+        "Prefer",
+        "return=minimal"
+    );
+
+    // --------------------------------------------------------
+    // JSON
+    // --------------------------------------------------------
+
+    String json = "{";
+
+    json +=
+        "\"device_id\":\"";
+
+    json +=
+        deviceID;
+
+    json +=
+        "\",";
+
+    // MQ3
+
+    json +=
+        "\"mq3\":";
+
+    json +=
+        String(mq3Value);
+
+    json +=
+        ",";
+
+    // MQ8
+
+    json +=
+        "\"mq8\":";
+
+    json +=
+        String(mq8Value);
+
+    json +=
+        ",";
+
+    // Temperature
+
+    json +=
+        "\"dht22_temperature\":";
+
+    json +=
+        String(
+            dhtTemperature,
+            2
+        );
+
+    json +=
+        ",";
+
+    // Humidity
+
+    json +=
+        "\"dht22_humidity\":";
+
+    json +=
+        String(
+            dhtHumidity,
+            2
+        );
+
+    json +=
+        ",";
+
+    // Latitude
+
+    json +=
+        "\"latitude\":";
+
+    json +=
+        String(
+            latitude,
+            6
+        );
+
+    json +=
+        ",";
+
+    // Longitude
+
+    json +=
+        "\"longitude\":";
+
+    json +=
+        String(
+            longitude,
+            6
+        );
+
+    json +=
+        ",";
+
+    // Altitude
+
+    json +=
+        "\"altitude\":";
+
+    json +=
+        String(
+            altitude,
+            2
+        );
+
+    json +=
+        ",";
+
+    // Satellites
+
+    json +=
+        "\"gps_satellites\":";
+
+    json +=
+        String(
+            satellites
+        );
+
+    json +=
+        ",";
+
+    // HDOP
+
+    json +=
+        "\"gps_hdop\":";
+
+    json +=
+        String(
+            hdop,
+            2
+        );
+
+    json +=
+        ",";
+
+    // GPS Fix
+
+    json +=
+        "\"gps_fix\":";
+
+    json +=
+        gpsFix
+        ? "true"
+        : "false";
+
+    json +=
+        ",";
+
+    // RSSI
+
+    json +=
+        "\"rssi\":";
+
+    json +=
+        String(
+            rssi,
+            1
+        );
+
+    json +=
+        ",";
+
+    // SNR
+
+    json +=
+        "\"snr\":";
+
+    json +=
+        String(
+            snr,
+            1
+        );
+
+    json +=
+        "}";
+
+    // --------------------------------------------------------
+    // DEBUG JSON
+    // --------------------------------------------------------
+
+    Serial.print(
+        "Supabase JSON: "
+    );
+
+    Serial.println(
+        json
+    );
+
+    // --------------------------------------------------------
+    // POST
+    // --------------------------------------------------------
+
+    int httpCode =
+        http.POST(
+            json
+        );
+
+    Serial.print(
+        "Supabase HTTP result: "
+    );
+
+    Serial.println(
+        httpCode
+    );
+
+    // --------------------------------------------------------
+    // RESULT
+    // --------------------------------------------------------
+
+    if (
+        httpCode >= 200 &&
+        httpCode < 300
+    )
+    {
+        Serial.println(
+            "Supabase upload SUCCESS"
+        );
+    }
+    else
+    {
+        Serial.println(
+            "Supabase upload FAILED"
+        );
+
+        Serial.print(
+            "Supabase response: "
+        );
+
+        Serial.println(
+            http.getString()
+        );
+    }
+
+    http.end();
+}
+
+// ============================================================
+// WIFI MONITOR
+// ============================================================
+
+void checkWiFi()
+{
+    if (
+        millis() - lastWiFiCheck <
+        WIFI_CHECK_INTERVAL
+    )
+    {
+        return;
+    }
+
+    lastWiFiCheck =
+        millis();
+
+    if (
+        WiFi.status() != WL_CONNECTED
+    )
+    {
+        Serial.println(
+            "Wi-Fi disconnected."
+        );
+
+        Serial.println(
+            "Attempting reconnect..."
+        );
+
+        WiFi.disconnect();
+
+        WiFi.begin(
+            WIFI_SSID,
+            WIFI_PASSWORD
+        );
+    }
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+    Serial.begin(
+        115200
+    );
+
+    delay(1500);
+
+    Serial.println();
+
+    Serial.println(
+        "======================================"
+    );
+
+    Serial.println(
+        " HELTEC WIFI LoRa 32 V3"
+    );
+
+    Serial.println(
+        " NODE 2 - LoRa GATEWAY"
+    );
+
+    Serial.println(
+        " MQ3 + MQ8 + DHT22 + GPS"
+    );
+
+    Serial.println(
+        " Wi-Fi + Supabase + Web Server"
+    );
+
+    Serial.println(
+        " OLED: NOT USED"
+    );
+
+    Serial.println(
+        "======================================"
+    );
+
+    // ========================================================
+    // LORA SPI
+    // ========================================================
+
+    Serial.println(
+        "Starting LoRa SPI..."
+    );
+
+    spiLoRa.begin(
+        LORA_SCK,
+        LORA_MISO,
+        LORA_MOSI,
+        LORA_CS
+    );
+
+    delay(100);
+
+    // ========================================================
+    // SX1262
+    // ========================================================
+
+    Serial.println(
+        "Initializing SX1262..."
+    );
+
+    int state =
+        radio.begin(
+            LORA_FREQUENCY,
+            125.0,
+            7,
+            5,
+            0x12,
+            14,
+            8,
+            1.8
+        );
+
+    if (
+        state != RADIOLIB_ERR_NONE
+    )
+    {
+        Serial.print(
+            "LoRa initialization FAILED: "
+        );
+
+        Serial.println(
+            state
+        );
+
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println(
+        "LoRa initialization SUCCESS"
+    );
+
+    radio.setOutputPower(
+        14
+    );
+
+    radio.setCRC(
+        true
+    );
+
+    // ========================================================
+    // WIFI
+    // ========================================================
+
+    connectWiFi();
+
+    // ========================================================
+    // WEB SERVER
+    // ========================================================
+
+    server.on(
+        "/",
+        handleRoot
+    );
+
+    server.on(
+        "/data",
+        handleData
+    );
+
+    server.begin();
+
+    Serial.println(
+        "Web server started"
+    );
+
+    if (
+        WiFi.status() ==
+        WL_CONNECTED
+    )
+    {
+        Serial.print(
+            "Open browser at: http://"
+        );
+
+        Serial.println(
+            WiFi.localIP()
+        );
+    }
+
+    // ========================================================
+    // START RECEIVER
+    // ========================================================
+
+    radio.startReceive();
+
+    Serial.println();
+
+    Serial.println(
+        "======================================"
+    );
+
+    Serial.println(
+        " GATEWAY READY"
+    );
+
+    Serial.println(
+        " Waiting for LoRa packets..."
+    );
+
+    Serial.println(
+        "======================================"
+    );
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop()
+{
+    // --------------------------------------------------------
+    // WEB SERVER
+    // --------------------------------------------------------
+
+    server.handleClient();
+
+    // --------------------------------------------------------
+    // LORA
+    // --------------------------------------------------------
+
+    receiveLoRa();
+
+    // --------------------------------------------------------
+    // WIFI
+    // --------------------------------------------------------
+
+    checkWiFi();
+
+    // --------------------------------------------------------
+    // SUPABASE
+    // --------------------------------------------------------
+
+    uploadToSupabase();
+
+    // --------------------------------------------------------
+    // SENSOR TIMEOUT
+    // --------------------------------------------------------
+
+    if (
+        receivedData &&
+        millis() - lastPacketTime >
+        15000
+    )
+    {
+        receivedData =
+            false;
+    }
+
+    delay(10);
+}
